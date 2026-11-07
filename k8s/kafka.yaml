@@ -1,0 +1,213 @@
+# Kafka in KRaft mode (no ZooKeeper) — single broker, minikube-friendly.
+# Deployed in the 'monitoring' namespace alongside the rest of the platform.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-config
+  namespace: monitoring
+  labels:
+    app: kafka
+data:
+  server.properties: |
+    # KRaft mode — no ZooKeeper
+    process.roles=broker,controller
+    node.id=1
+    controller.quorum.voters=1@kafka-0.kafka-headless.monitoring.svc.cluster.local:9093
+    listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+    advertised.listeners=PLAINTEXT://kafka.monitoring.svc.cluster.local:9092
+    listener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+    controller.listener.names=CONTROLLER
+    inter.broker.listener.name=PLAINTEXT
+    log.dirs=/var/kafka/data
+    num.partitions=3
+    default.replication.factor=1
+    min.insync.replicas=1
+    log.retention.hours=24
+    log.retention.bytes=536870912
+    log.segment.bytes=134217728
+    auto.create.topics.enable=true
+    offsets.topic.replication.factor=1
+    transaction.state.log.replication.factor=1
+    transaction.state.log.min.isr=1
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: monitoring
+  labels:
+    app: kafka
+spec:
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 9092
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: monitoring
+  labels:
+    app: kafka
+spec:
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 9092
+    - name: controller
+      port: 9093
+      targetPort: 9093
+  clusterIP: None
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: monitoring
+  labels:
+    app: kafka
+spec:
+  serviceName: kafka-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: kafka-init
+          image: apache/kafka:3.7.0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              CLUSTER_ID=$(/opt/kafka/bin/kafka-storage.sh random-uuid)
+              /opt/kafka/bin/kafka-storage.sh format \
+                --config /mnt/kafka-config/server.properties \
+                --cluster-id $CLUSTER_ID \
+                --ignore-formatted
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/kafka/data
+            - name: kafka-config
+              mountPath: /mnt/kafka-config
+          env:
+            - name: KAFKA_LOG_DIRS
+              value: /var/kafka/data
+      containers:
+        - name: kafka
+          image: apache/kafka:3.7.0
+          ports:
+            - containerPort: 9092
+              name: broker
+            - containerPort: 9093
+              name: controller
+          command:
+            - /opt/kafka/bin/kafka-server-start.sh
+            - /mnt/kafka-config/server.properties
+          env:
+            - name: KAFKA_CLUSTER_ID
+              value: "self-healing-eks-cluster-1"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/kafka/data
+            - name: kafka-config
+              mountPath: /mnt/kafka-config
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 15
+            periodSeconds: 5
+      volumes:
+        - name: kafka-config
+          configMap:
+            name: kafka-config
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+# Topic initialisation job — creates 'raw-metrics' topic on first deploy
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topic-init
+  namespace: monitoring
+  labels:
+    app: kafka-init
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: topic-creator
+          image: apache/kafka:3.7.0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # Wait for broker to be ready
+              until /opt/kafka/bin/kafka-broker-api-versions.sh \
+                --bootstrap-server kafka.monitoring.svc.cluster.local:9092 > /dev/null 2>&1; do
+                echo "Waiting for Kafka broker..."
+                sleep 5
+              done
+              echo "Broker ready. Creating topics..."
+              /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server kafka.monitoring.svc.cluster.local:9092 \
+                --create --if-not-exists \
+                --topic raw-metrics \
+                --partitions 3 \
+                --replication-factor 1
+              echo "Topics created."
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
