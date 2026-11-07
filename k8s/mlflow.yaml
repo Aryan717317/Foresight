@@ -1,0 +1,103 @@
+# MLflow tracking server — in-cluster, SQLite backend, PVC artifact store.
+# Suitable for portfolio/demo; production should use RDS + S3.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-pvc
+  namespace: monitoring
+  labels:
+    app: mlflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: monitoring
+  labels:
+    app: mlflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "mkdir -p /mlflow/db /mlflow/artifacts && chown -R 1000:1000 /mlflow"]
+          volumeMounts:
+            - name: mlflow-storage
+              mountPath: /mlflow
+      containers:
+        - name: mlflow
+          image: ghcr.io/mlflow/mlflow:v2.13.2
+          ports:
+            - containerPort: 5000
+              name: http
+          command:
+            - mlflow
+            - server
+            - --backend-store-uri=sqlite:////mlflow/db/mlflow.db
+            - --default-artifact-root=/mlflow/artifacts
+            - --host=0.0.0.0
+            - --port=5000
+            - --workers=2
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: mlflow-storage
+              mountPath: /mlflow
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: mlflow-storage
+          persistentVolumeClaim:
+            claimName: mlflow-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: monitoring
+  labels:
+    app: mlflow
+spec:
+  selector:
+    app: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+  type: ClusterIP
