@@ -1,0 +1,249 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-predictive-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    app: grafana
+data:
+  predictive-incidents.json: |
+    {
+      "id": null,
+      "uid": "predictive-self-healing",
+      "title": "Predictive Self-Healing — Incident Forecast",
+      "description": "LSTM-based incident predictions vs actual threshold alerts, model health, and feature drift status.",
+      "tags": ["self-healing", "ml", "predictive"],
+      "timezone": "browser",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-3h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Predicted Incidents (LSTM)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "fixed", "fixedColor": "orange" },
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 20,
+                "drawStyle": "bars",
+                "barAlignment": 0
+              },
+              "unit": "short",
+              "displayName": "Predicted Incidents"
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "single" }
+          },
+          "targets": [
+            {
+              "expr": "increase(predictor_incident_predictions_total[1m])",
+              "legendFormat": "Predicted ({{namespace}})",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Actual Alert Firings (Alertmanager)",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "fixed", "fixedColor": "red" },
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 20,
+                "drawStyle": "bars"
+              },
+              "unit": "short",
+              "displayName": "Actual Alerts"
+            }
+          },
+          "targets": [
+            {
+              "expr": "increase(ALERTS{alertstate=\"firing\", namespace=\"app\"}[1m])",
+              "legendFormat": "{{alertname}} ({{namespace}})",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Prediction Confidence Distribution",
+          "type": "histogram",
+          "gridPos": { "x": 0, "y": 8, "w": 8, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" }, "unit": "short" }
+          },
+          "targets": [
+            {
+              "expr": "predictor_confidence_score_bucket",
+              "legendFormat": "Confidence",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Model Version",
+          "type": "stat",
+          "gridPos": { "x": 8, "y": 8, "w": 4, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null }
+                ]
+              },
+              "unit": "short",
+              "displayName": "Active Model Version"
+            }
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto" },
+          "targets": [
+            {
+              "expr": "predictor_model_version",
+              "legendFormat": "Version",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Inference Latency (p99)",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 8, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": { "mode": "fixed", "fixedColor": "purple" },
+              "custom": { "lineWidth": 2 },
+              "displayName": "Inference p99"
+            }
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, rate(predictor_inference_duration_seconds_bucket[5m]))",
+              "legendFormat": "p99 inference latency",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Windows Processed / min",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 14, "w": 8, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": { "mode": "fixed", "fixedColor": "green" },
+              "custom": { "lineWidth": 1 }
+            }
+          },
+          "targets": [
+            {
+              "expr": "rate(predictor_window_fills_total[1m]) * 60",
+              "legendFormat": "Windows/min ({{namespace}})",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "title": "Prediction Lead Time Analysis",
+          "type": "text",
+          "gridPos": { "x": 8, "y": 14, "w": 16, "h": 6 },
+          "options": {
+            "mode": "markdown",
+            "content": "## Lead Time Monitoring\n\n**Target**: 3–5 minutes between prediction event and actual alert firing.\n\n**How to measure manually**:\n```\nkubectl logs -n monitoring deploy/predictor-consumer | grep 'Predicted incident'\nkubectl -n monitoring port-forward svc/remediation-bot-service 9000:9000\ncurl http://localhost:9000/predictions | jq '.entries[] | {ts, confidence, namespace}'\n```\n\n**Model Registry**: [MLflow UI](http://localhost:5000) (after `make port-mlflow`)\n\n**Drift status**: Check the `drift_detected` tag on the Production model version in MLflow."
+          }
+        },
+        {
+          "id": 8,
+          "title": "CPU Delta (Feature)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 20, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 1, "fillOpacity": 10 }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"app\", container!=\"\"}[1m])) by (pod)",
+              "legendFormat": "{{pod}} CPU rate",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "title": "Memory Usage (Feature)",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 20, "w": 12, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 1, "fillOpacity": 10 }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"app\", container!=\"\"}) by (pod)",
+              "legendFormat": "{{pod}} memory",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "title": "Acting on Predictions",
+          "type": "stat",
+          "gridPos": { "x": 0, "y": 26, "w": 4, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "yellow", "value": null },
+                  { "color": "green", "value": 1 }
+                ]
+              },
+              "unit": "bool",
+              "displayName": "Actions Enabled"
+            }
+          },
+          "targets": [
+            {
+              "expr": "predictor_incident_predictions_total{acted=\"true\"} > 0",
+              "legendFormat": "Actions enabled",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
